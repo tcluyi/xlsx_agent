@@ -166,13 +166,25 @@ check("对比-进退步", list(a.df["进退步"]) == [10, -5], f"实际 {list(a.
 
 
 # ---------------------------------------------------------------------------
-# 9. 工具数量自检
+# 9. 输出文件名（正则提取 + 工具指定）
+# ---------------------------------------------------------------------------
+check("文件名-提取保存为", agent._extract_output_name("按总分排序，保存为 排名表.xlsx") == "排名表.xlsx")
+check("文件名-无后缀自动补", agent._extract_output_name("命名为 一班学生") == "一班学生.xlsx")
+check("文件名-未指定返回None", agent._extract_output_name("按总分从高到低排序") is None)
+check("文件名-非法字符清理", agent._sanitize_output_name('结果表?.xlsx') == "结果表.xlsx")
+a = make_agent(pd.DataFrame({"a": [1]}))
+a._execute("set_output_name", {"name": "我的结果"})
+check("文件名-工具设置", a.output_name == "我的结果.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# 10. 工具数量自检
 # ---------------------------------------------------------------------------
 names = [t["function"]["name"] for t in agent.TOOLS]
 expect = {"filter_rows", "sort_rows", "select_columns", "group_aggregate", "take_top_n",
           "reset", "merge_tables", "compute_rank", "classify_grades",
-          "score_segment_stats", "compute_stats", "compare_scores"}
-check("工具数量=12", len(names) == 12 and set(names) == expect, f"实际 {names}")
+          "score_segment_stats", "compute_stats", "compare_scores", "set_output_name"}
+check("工具数量=13", len(names) == 13 and set(names) == expect, f"实际 {names}")
 
 
 print("\n" + "=" * 50)

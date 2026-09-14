@@ -393,6 +393,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_output_name",
+            "description": (
+                "设置结果文件的名称。当用户在查询中指定了输出文件名（如“保存为排名表.xlsx”“命名为xxx”）时调用。"
+                "name 可带或不带 .xlsx 后缀。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "结果文件名"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 _FUNC_MAP = {
@@ -418,6 +435,33 @@ def _is_grade_column(series):
         return False
     return vals.str.match(_GRADE_RE).mean() >= 0.8
 
+
+def _sanitize_output_name(name):
+    """把用户/模型给出的文件名清理为合法 .xlsx 文件名，非法时返回 None。"""
+    name = str(name).strip().strip('"').strip("“”'’")
+    name = Path(name).name                      # 去掉任何路径部分
+    for ch in r'\/:*?"<>|':
+        name = name.replace(ch, "")
+    name = name.strip().rstrip(".")
+    if not name:
+        return None
+    if not name.lower().endswith(".xlsx"):
+        name += ".xlsx"
+    return name
+
+
+_OUTPUT_NAME_RE = re.compile(
+    r"(?:保存为|命名为|输出为|输出到|导出为|导出到|另存为|文件名为|存为|写成)\s*[:：]?\s*([^\s，。；;、,]+)"
+)
+
+
+def _extract_output_name(query):
+    """从查询里提取用户指定的输出文件名（如“保存为排名表.xlsx”），没有则返回 None。"""
+    m = _OUTPUT_NAME_RE.search(str(query))
+    if not m:
+        return None
+    return _sanitize_output_name(m.group(1))
+
 SYSTEM_PROMPT = """你是一个表格数据处理助手。用户会给出表格的结构信息和一句中文查询。
 你需要使用提供的工具完成用户想要的操作，最终得到一张新的表格（或一张汇总表）。
 
@@ -434,6 +478,7 @@ SYSTEM_PROMPT = """你是一个表格数据处理助手。用户会给出表格�
 - score_segment_stats：统计每个分数段的人数
 - compute_stats：统计平均分、及格率、优秀率等指标
 - compare_scores：计算两次成绩的进退步（本次减上次）
+- set_output_name：设置结果文件名称（当用户在查询中指定了输出文件名时调用）
 
 规则：
 1. 每次工具调用后，你会收到结果表格的预览（行数、列数和前几行）。根据预览判断是否已满足查询，必要时继续调用工具。
@@ -443,6 +488,7 @@ SYSTEM_PROMPT = """你是一个表格数据处理助手。用户会给出表格�
 5. 排名、等级划分、分数段、平均分/及格率/优秀率、进退步等计算只对“数值列”有效；若列是等级（A/B/C）而非分数，则无法计算，请改用 sort/filter。
 6. 多表合并时，用表格别名（表1、表2…）引用，并用公共键列（如姓名、考试号）对齐。
 7. 完成所有操作后，不再调用工具，用一句简短的中文说明你对表格做了什么。
+8. 如果用户在查询中指定了输出文件名（如“保存为排名表.xlsx”“命名为xxx”），请调用 set_output_name 工具设置文件名。
 
 标准等级高低顺序（从高到低，自动套用）：A+ > A > A- > B+ > B > B- > C+ > C > C- > D+ > D > D- > E。"""
 
@@ -499,6 +545,7 @@ class TableAgent:
         self.columns = []
         self.tables = {}        # 表格别名 -> DataFrame（支持多表合并）
         self.table_names = {}   # 表格别名 -> 原始文件名
+        self.output_name = None  # 用户/模型指定的输出文件名
 
     # ---- 表格加载 ----
     def load_tables(self, table_paths):
@@ -709,6 +756,13 @@ class TableAgent:
             df = df.copy()
             df[new_col] = a - b
 
+        elif name == "set_output_name":
+            nm = _sanitize_output_name(args.get("name", ""))
+            if not nm:
+                return "错误：输出文件名无效"
+            self.output_name = nm
+            return f"已设置结果文件名为：{nm}（当前表格不变）"
+
         else:
             return f"错误：未知工具 {name}"
 
@@ -727,8 +781,24 @@ class TableAgent:
         return "\n".join(parts)
 
     # ---- 主流程 ----
-    def run(self, table_paths, query):
+    def run(self, table_paths, query, on_event=None):
+        """运行智能体。on_event 可选：回调函数，接收事件 dict（供 GUI 实时展示进度）。
+
+        事件类型：
+            {"type": "status",  "text": ...}   处理中的状态提示
+            {"type": "step",    "step": n, "tool": ..., "args": {...}}  一次工具调用
+            {"type": "preview", "text": ...}   工具调用后的表格预览
+            {"type": "answer",  "text": ...}   最终说明
+            {"type": "done",    "out_path": ..., "rows": n, "cols": n}  完成
+            {"type": "error",   "text": ...}   错误
+        """
+        def emit(event):
+            if on_event:
+                on_event(event)
+
         paths = [table_paths] if isinstance(table_paths, (str, os.PathLike)) else list(table_paths)
+        self.output_name = None
+        emit({"type": "status", "text": f"正在加载 {len(paths)} 张表格…"})
         self.load_tables(paths)
         if len(self.tables) == 1:
             schema = build_schema(self.original)
@@ -744,33 +814,48 @@ class TableAgent:
         ]
 
         final_answer = ""
-        for step in range(MAX_STEPS):
-            resp = self._chat(messages)
-            msg = resp["choices"][0]["message"]
-            messages.append(msg)
+        try:
+            for step in range(MAX_STEPS):
+                emit({"type": "status", "text": f"第 {step + 1} 轮：正在思考…"})
+                resp = self._chat(messages)
+                msg = resp["choices"][0]["message"]
+                messages.append(msg)
 
-            tool_calls = msg.get("tool_calls")
-            if not tool_calls:
-                final_answer = msg.get("content") or ""
-                break
+                tool_calls = msg.get("tool_calls")
+                if not tool_calls:
+                    final_answer = msg.get("content") or ""
+                    break
 
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                name = fn.get("name", "")
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                if self.verbose:
-                    print(f"[步骤 {step + 1}] 调用工具 {name} 参数={json.dumps(args, ensure_ascii=False)}")
-                result = self._execute(name, args)
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    if self.verbose:
+                        print(f"[步骤 {step + 1}] 调用工具 {name} 参数={json.dumps(args, ensure_ascii=False)}")
+                    emit({"type": "step", "step": step + 1, "tool": name, "args": args})
+                    result = self._execute(name, args)
+                    emit({"type": "preview", "text": result})
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
+            else:
+                final_answer = "(达到最大工具调用轮数，已按当前结果输出)"
+        except Exception as e:
+            emit({"type": "error", "text": str(e)})
+            raise
+
+        # 保存结果：优先使用查询/工具指定的文件名，否则自动生成
+        output_name = self.output_name or _extract_output_name(query)
+        base_dir = Path(paths[0]).parent
+        if output_name:
+            out_path = base_dir / output_name
         else:
-            final_answer = "(达到最大工具调用轮数，已按当前结果输出)"
-
-        # 保存结果
-        out_path = Path(paths[0]).with_name(Path(paths[0]).stem + "_结果.xlsx")
+            out_path = base_dir / (Path(paths[0]).stem + "_结果.xlsx")
         self.df.to_excel(out_path, index=False)
+        emit({"type": "answer", "text": final_answer or "（无说明）"})
+        emit({"type": "done", "out_path": str(out_path),
+              "rows": len(self.df), "cols": len(self.df.columns)})
 
         if self.verbose:
             print("\n" + "=" * 60)

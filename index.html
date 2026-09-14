@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表格智能体</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --border: #e3e5e8;
+    --text: #1f2329;
+    --muted: #8a919c;
+    --brand: #3b82f6;
+    --brand-dark: #2563eb;
+    --user-bubble: #dbeafe;
+    --ai-bubble: #ffffff;
+    --code-bg: #0f172a;
+    --code-text: #e2e8f0;
+    --error: #dc2626;
+    --ok: #16a34a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+  }
+
+  /* 侧边栏 */
+  .sidebar {
+    width: 260px;
+    min-width: 260px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 16px 14px;
+    gap: 10px;
+  }
+  .sidebar h2 { font-size: 14px; margin: 0 0 4px; color: var(--muted); font-weight: 600; letter-spacing: .5px; }
+  .file-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .file-item {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    cursor: pointer; font-size: 13px; line-height: 1.4; word-break: break-all;
+    background: #fafbfc; transition: border-color .15s, background .15s;
+  }
+  .file-item:hover { border-color: var(--brand); }
+  .file-item input { margin-top: 2px; }
+  .file-item .tag { font-size: 11px; color: var(--muted); }
+  .btn {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px;
+  }
+  .btn:hover { border-color: var(--brand); color: var(--brand-dark); }
+  .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .btn.primary:hover { background: var(--brand-dark); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+  /* 主区域 */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .header {
+    padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+    font-size: 15px; font-weight: 600;
+  }
+  .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 82%; display: flex; flex-direction: column; }
+  .msg .bubble {
+    padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-word; box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.user .bubble { background: var(--user-bubble); border-bottom-right-radius: 4px; }
+  .msg.ai { align-self: flex-start; align-items: flex-start; }
+  .msg.ai .bubble { background: var(--ai-bubble); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg.ai.answer .bubble { border-color: #bbf7d0; background: #f0fdf4; }
+  .msg.ai.error .bubble { border-color: #fecaca; background: #fef2f2; color: var(--error); }
+  .msg.ai.done .bubble { border-color: #bfdbfe; background: #eff6ff; }
+  .status {
+    align-self: center; font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .6; animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,100% { opacity:.2 } 50% { opacity:.8 } }
+  pre.code {
+    background: var(--code-bg); color: var(--code-text);
+    padding: 10px 12px; border-radius: 8px; margin: 8px 0 0; overflow-x: auto;
+    font-size: 12px; line-height: 1.5; font-family: "SF Mono", Consolas, "Courier New", monospace;
+    white-space: pre;
+  }
+  .msg .tool-name { font-weight: 600; color: var(--brand-dark); }
+  .msg .bubble a { color: var(--brand-dark); font-weight: 600; }
+
+  .input-bar {
+    display: flex; gap: 10px; padding: 14px 20px; background: var(--panel);
+    border-top: 1px solid var(--border); align-items: flex-end;
+  }
+  .input-bar textarea {
+    flex: 1; resize: none; border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; font-family: inherit; min-height: 44px;
+    max-height: 160px; outline: none;
+  }
+  .input-bar textarea:focus { border-color: var(--brand); }
+  .hint { font-size: 12px; color: var(--muted); padding: 0 20px 8px; background: var(--panel); }
+  .drop-overlay {
+    position: fixed; inset: 0; background: rgba(59,130,246,.10);
+    border: 3px dashed var(--brand); display: none;
+    align-items: center; justify-content: center; z-index: 100;
+    font-size: 20px; color: var(--brand-dark); pointer-events: none;
+  }
+  .drop-overlay.show { display: flex; }
+</style>
+</head>
+<body>
+  <div class="drop-overlay" id="dropOverlay">📥 松开鼠标，把 xlsx 文件拖入处理</div>
+  <aside class="sidebar">
+    <h2>表格文件（可多选）</h2>
+    <div class="file-list" id="fileList">
+      <div class="status">加载中…</div>
+    </div>
+    <button class="btn" id="uploadBtn">📤 上传 xlsx</button>
+    <input type="file" id="fileInput" accept=".xlsx" multiple style="display:none">
+    <button class="btn" id="refreshBtn">刷新文件列表</button>
+    <div class="hint" style="padding:0">提示：也可直接把 xlsx 文件拖进窗口</div>
+  </aside>
+
+  <main class="main">
+    <div class="header">📊 表格智能体 · 对话式处理</div>
+    <div class="messages" id="messages">
+      <div class="msg ai"><div class="bubble">
+        你好！请先选择左侧的表格文件，然后输入你想做的操作，例如：<br>
+        · 按总分从高到低排序<br>
+        · 筛选出八年级1班的学生<br>
+        · 把各科成绩合并成总表<br>
+        · 统计各班的平均分、及格率
+      </div></div>
+    </div>
+    <div class="hint" id="hint">提示：Enter 发送，Shift+Enter 换行</div>
+    <div class="input-bar">
+      <textarea id="query" placeholder="输入你的查询…"></textarea>
+      <button class="btn primary" id="sendBtn">发送</button>
+    </div>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const messages = $('messages');
+const queryBox = $('query');
+const sendBtn = $('sendBtn');
+let busy = false;
+
+function scrollBottom() {
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function bubble(text, cls) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + (cls || '');
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  b.textContent = text;
+  wrap.appendChild(b);
+  messages.appendChild(wrap);
+  scrollBottom();
+  return b;
+}
+
+function addUser(text) { return bubble(text, 'user'); }
+
+function addAssistant(text, cls) {
+  const b = bubble(text, 'ai' + (cls ? ' ' + cls : ''));
+  return b;
+}
+
+function addStatus(text) {
+  const s = document.createElement('div');
+  s.className = 'status';
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  const t = document.createElement('span');
+  t.textContent = text;
+  s.appendChild(dot);
+  s.appendChild(t);
+  messages.appendChild(s);
+  scrollBottom();
+  return s;
+}
+
+function appendCode(parentEl, text) {
+  const pre = document.createElement('pre');
+  pre.className = 'code';
+  pre.textContent = text;
+  parentEl.appendChild(pre);
+  scrollBottom();
+}
+
+function setBusy(v) {
+  busy = v;
+  sendBtn.disabled = v;
+  sendBtn.textContent = v ? '处理中…' : '发送';
+}
+
+async function loadFiles(checkedNames) {
+  const list = $('fileList');
+  try {
+    const r = await fetch('/api/files');
+    const data = await r.json();
+    list.innerHTML = '';
+    const names = data.files || [];
+    names.forEach((f) => {
+      const item = document.createElement('label');
+      item.className = 'file-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = f;
+      if (checkedNames) cb.checked = checkedNames.has(f);
+      else if (names.indexOf(f) === 0) cb.checked = true;
+      const span = document.createElement('span');
+      span.textContent = f;
+      item.appendChild(cb);
+      item.appendChild(span);
+      list.appendChild(item);
+    });
+    if (!names.length) {
+      list.innerHTML = '<div class="status">目录下没有 .xlsx 文件</div>';
+    }
+  } catch (e) {
+    list.innerHTML = '<div class="status">加载失败</div>';
+  }
+}
+
+function handleEvent(ev, current) {
+  switch (ev.type) {
+    case 'status':
+      addStatus(ev.text);
+      return current;
+    case 'step': {
+      const b = addAssistant('步骤 ' + ev.step + '：调用工具 ' + ev.tool, 'step');
+      const name = document.createElement('span');
+      name.className = 'tool-name';
+      if (ev.args && Object.keys(ev.args).length) {
+        appendCode(b, JSON.stringify(ev.args, null, 2));
+      }
+      return b;
+    }
+    case 'preview':
+      if (current) appendCode(current, ev.text);
+      else addAssistant(ev.text);
+      return current;
+    case 'answer':
+      addAssistant(ev.text, 'answer');
+      return null;
+    case 'done': {
+      const base = (ev.out_path || '').split(/[\\/]/).pop();
+      const b = addAssistant('已完成，结果保存为：' + base, 'done');
+      const a = document.createElement('a');
+      a.href = '/api/download?name=' + encodeURIComponent(base);
+      a.textContent = '⬇ 下载结果文件';
+      const p = document.createElement('div');
+      p.style.marginTop = '6px';
+      p.appendChild(a);
+      b.appendChild(p);
+      return null;
+    }
+    case 'error':
+      addAssistant(ev.text, 'error');
+      return null;
+    default:
+      return current;
+  }
+}
+
+async function send() {
+  const text = queryBox.value.trim();
+  if (!text || busy) return;
+  const files = [...document.querySelectorAll('#fileList input:checked')].map(c => c.value);
+  if (!files.length) { addAssistant('请先在左侧选择至少一个表格文件', 'error'); return; }
+
+  addUser(text);
+  queryBox.value = '';
+  setBusy(true);
+  let current = null;
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: text, files }),
+    });
+    if (!resp.ok || !resp.body) {
+      let msg = '请求失败（HTTP ' + resp.status + '）';
+      try { const j = await resp.json(); if (j.error) msg = j.error; } catch (e) {}
+      addAssistant(msg, 'error');
+      setBusy(false);
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+        current = handleEvent(ev, current);
+      }
+    }
+  } catch (e) {
+    addAssistant('请求出错：' + e.message, 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+sendBtn.addEventListener('click', send);
+queryBox.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('refreshBtn').addEventListener('click', () => loadFiles());
+
+// —— 上传（拖拽 / 点击选择）——
+async function handleFiles(fileList) {
+  const files = [...fileList].filter(f => f.name.toLowerCase().endsWith('.xlsx'));
+  if (!files.length) { addStatus('未检测到 .xlsx 文件'); return; }
+  const uploaded = new Set();
+  for (const f of files) {
+    addStatus('正在上传 ' + f.name + ' …');
+    try {
+      const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name), {
+        method: 'POST',
+        body: f,
+      });
+      const j = await r.json();
+      if (j.ok) { uploaded.add(j.name); addStatus('已上传：' + j.name); }
+      else { addAssistant((j.error || '上传失败') + '（' + f.name + '）', 'error'); }
+    } catch (e) {
+      addAssistant('上传出错：' + e.message, 'error');
+    }
+  }
+  if (uploaded.size) await loadFiles(uploaded);
+}
+
+$('uploadBtn').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
+
+const overlay = $('dropOverlay');
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; overlay.classList.add('show'); });
+window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('dragleave', (e) => { e.preventDefault(); dragDepth--; if (dragDepth <= 0) { dragDepth = 0; overlay.classList.remove('show'); } });
+window.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; overlay.classList.remove('show'); if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files); });
+
+loadFiles();
+</script>
+</body>
+</html>
