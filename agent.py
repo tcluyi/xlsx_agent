@@ -41,6 +41,7 @@
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -410,6 +411,51 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "insert_group_ratio",
+            "description": (
+                "按分组统计各列的“达标比例”，并把结果作为新的一行插入到每个分组的末尾。"
+                "例如“各班各学科B及以上学生的比例”：group_by=[\"班级\"]，columns=[各学科列]，grade=\"B\"。"
+                "grade 与 value 二选一：grade 为等级阈值（统计等级>=该等级的比例，用于 A/B/C 等级列），"
+                "value 为数值阈值（统计数值>=该值的比例，用于百分制列）。"
+                "label_col 指定把汇总标签写在哪一列（如“姓名”），label 为标签文字（如“B及以上比例(%)”）。"
+                "比例以百分数表示（0-100，保留 1 位小数）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "group_by": {"type": "array", "items": {"type": "string"}, "description": "分组列，如 [\"班级\"]"},
+                    "columns": {"type": "array", "items": {"type": "string"}, "description": "要统计比例的列，如各学科列"},
+                    "grade": {"type": "string", "description": "等级阈值（统计该等级及以上比例），如 \"B\""},
+                    "value": {"type": "number", "description": "数值阈值（统计数值>=该值的比例）"},
+                    "label_col": {"type": "string", "description": "把汇总标签写在哪一列，如 \"姓名\""},
+                    "label": {"type": "string", "description": "汇总行标签文字，如 \"B及以上比例(%)\""},
+                },
+                "required": ["group_by", "columns"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": (
+                "执行一段 pandas 代码，对当前表格做任意复杂操作（当其他结构化工具无法完成时使用，"
+                "如分组统计后把结果作为新行插回表格、复杂透视、自定义计算等）。"
+                "代码中可直接使用：df（当前表格 DataFrame）、pd（pandas）、grade_num（把等级列或单个等级转数值，如 grade_num(df['语文'])、grade_num('B')）。"
+                "代码最后必须把结果赋回 df，例如 df = df.groupby('班级').apply(...) 或 df['新列'] = ...。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "要执行的 pandas 代码，最后必须把结果赋给 df"},
+                },
+                "required": ["code"],
+            },
+        },
+    },
 ]
 
 _FUNC_MAP = {
@@ -434,6 +480,17 @@ def _is_grade_column(series):
     if vals.empty:
         return False
     return vals.str.match(_GRADE_RE).mean() >= 0.8
+
+
+# 等级 -> 数值（等级越高数值越大），用于等级列的大小比较和比例计算
+_GRADE_NUM = {g: len(_GRADE_ORDER_DESC) - i for i, g in enumerate(_GRADE_ORDER_DESC)}
+
+
+def _grade_num(s):
+    """把等级（单个等级或整列）转成可比较的数值，等级越高数值越大。"""
+    if isinstance(s, str):
+        return _GRADE_NUM.get(s.strip().upper())
+    return s.astype(str).str.strip().str.upper().map(_GRADE_NUM)
 
 
 def _sanitize_output_name(name):
@@ -479,6 +536,8 @@ SYSTEM_PROMPT = """你是一个表格数据处理助手。用户会给出表格�
 - compute_stats：统计平均分、及格率、优秀率等指标
 - compare_scores：计算两次成绩的进退步（本次减上次）
 - set_output_name：设置结果文件名称（当用户在查询中指定了输出文件名时调用）
+- insert_group_ratio：按分组统计各列等级/数值达标比例，并把结果作为新行插入每个分组末尾
+- run_python：执行一段 pandas 代码对表格做任意复杂操作（其他工具都无法完成时才用）
 
 规则：
 1. 每次工具调用后，你会收到结果表格的预览（行数、列数和前几行）。根据预览判断是否已满足查询，必要时继续调用工具。
@@ -489,6 +548,8 @@ SYSTEM_PROMPT = """你是一个表格数据处理助手。用户会给出表格�
 6. 多表合并时，用表格别名（表1、表2…）引用，并用公共键列（如姓名、考试号）对齐。
 7. 完成所有操作后，不再调用工具，用一句简短的中文说明你对表格做了什么。
 8. 如果用户在查询中指定了输出文件名（如“保存为排名表.xlsx”“命名为xxx”），请调用 set_output_name 工具设置文件名。
+9. 复杂的多步操作（如分组统计后把结果作为新行插回表格、复杂透视等），若结构化工具无法直接完成，可用 run_python 一次性执行 pandas 代码完成（代码中可用 df、pd、grade_num）。
+10. 需要“按分组统计比例并作为新行插入分组末尾”时，优先用 insert_group_ratio 工具（grade 指定等级阈值如“B”，value 指定数值阈值），不要用 run_python 手写复杂代码。
 
 标准等级高低顺序（从高到低，自动套用）：A+ > A > A- > B+ > B > B- > C+ > C > C- > D+ > D > D- > E。"""
 
@@ -501,6 +562,21 @@ def _apply_op(df, col, op, value):
     if op in ("is_empty", "not_empty"):
         empty = s.isna() | (s.astype(str).str.strip() == "")
         return ~empty if op == "not_empty" else empty
+
+    # 等级列的大小比较（如“B及以上”“≥A-”），按等级顺序而非字符串序
+    if op in (">", "<", ">=", "<=") and _is_grade_column(s):
+        nums = _grade_num(s)
+        vn = _GRADE_NUM.get(str(value).strip().upper())
+        if vn is None:
+            return pd.Series(False, index=s.index)
+        if op == ">":
+            return nums > vn
+        if op == "<":
+            return nums < vn
+        if op == ">=":
+            return nums >= vn
+        if op == "<=":
+            return nums <= vn
 
     # 数值列：把字符串 value 转为数值再比较
     if pd.api.types.is_numeric_dtype(s):
@@ -763,6 +839,59 @@ class TableAgent:
             self.output_name = nm
             return f"已设置结果文件名为：{nm}（当前表格不变）"
 
+        elif name == "insert_group_ratio":
+            group_by = args.get("group_by", [])
+            if isinstance(group_by, str):
+                group_by = [group_by]
+            columns = args.get("columns", [])
+            if isinstance(columns, str):
+                columns = [columns]
+            grade = args.get("grade")
+            value = args.get("value")
+            label_col = args.get("label_col")
+            label = args.get("label", "汇总")
+            if not group_by:
+                return "错误：group_by 不能为空"
+            for c in group_by + columns:
+                if c not in df.columns:
+                    return f"错误：列「{c}」不存在，可用列：{self.columns}"
+            if label_col and label_col not in df.columns:
+                return f"错误：label_col「{label_col}」不存在，可用列：{self.columns}"
+            if grade is None and value is None:
+                return "错误：grade 与 value 必须指定其一"
+
+            def _summary(g):
+                row = {c: g[c].iloc[0] for c in group_by}
+                if label_col:
+                    row[label_col] = label
+                for c in columns:
+                    if grade is not None:
+                        mask = _grade_num(g[c]) >= _grade_num(grade)
+                    else:
+                        mask = pd.to_numeric(g[c], errors="coerce") >= float(value)
+                    row[c] = round(float(mask.mean()) * 100, 1) if len(mask) else 0.0
+                return row
+
+            def _apply(g):
+                row_df = pd.DataFrame([_summary(g)], columns=g.columns)
+                return pd.concat([g, row_df], ignore_index=True)
+
+            df = df.groupby(group_by, group_keys=False).apply(_apply).reset_index(drop=True)
+
+        elif name == "run_python":
+            code = args.get("code", "")
+            if not code:
+                return "错误：code 不能为空"
+            env = {"df": df.copy(), "pd": pd, "grade_num": _grade_num}
+            try:
+                exec(code, env)
+            except Exception as e:
+                return f"错误：代码执行失败：{e}"
+            new_df = env.get("df")
+            if not isinstance(new_df, pd.DataFrame):
+                return "错误：代码最后必须把结果赋回 df（DataFrame）"
+            df = new_df
+
         else:
             return f"错误：未知工具 {name}"
 
@@ -786,8 +915,9 @@ class TableAgent:
 
         事件类型：
             {"type": "status",  "text": ...}   处理中的状态提示
-            {"type": "step",    "step": n, "tool": ..., "args": {...}}  一次工具调用
-            {"type": "preview", "text": ...}   工具调用后的表格预览
+            {"type": "step",    "step": n, "tool": ..., "args": {...}, "llm_time": 秒}  一次工具调用（含 LLM 响应耗时）
+            {"type": "preview", "text": ..., "calc_time": 秒}   工具调用后的表格预览（含计算耗时）
+            {"type": "timing",  "step": n, "llm_time": 秒, "calc_time": 秒}  一轮耗时（无工具调用时）
             {"type": "answer",  "text": ...}   最终说明
             {"type": "done",    "out_path": ..., "rows": n, "cols": n}  完成
             {"type": "error",   "text": ...}   错误
@@ -817,13 +947,18 @@ class TableAgent:
         try:
             for step in range(MAX_STEPS):
                 emit({"type": "status", "text": f"第 {step + 1} 轮：正在思考…"})
+                t0 = time.perf_counter()
                 resp = self._chat(messages)
+                llm_time = time.perf_counter() - t0
                 msg = resp["choices"][0]["message"]
                 messages.append(msg)
 
                 tool_calls = msg.get("tool_calls")
                 if not tool_calls:
                     final_answer = msg.get("content") or ""
+                    emit({"type": "timing", "step": step + 1, "llm_time": llm_time, "calc_time": 0.0})
+                    if self.verbose:
+                        print(f"[第 {step + 1} 轮] LLM 响应耗时 {llm_time:.2f}s（本轮无工具调用）")
                     break
 
                 for tc in tool_calls:
@@ -834,10 +969,14 @@ class TableAgent:
                     except json.JSONDecodeError:
                         args = {}
                     if self.verbose:
-                        print(f"[步骤 {step + 1}] 调用工具 {name} 参数={json.dumps(args, ensure_ascii=False)}")
-                    emit({"type": "step", "step": step + 1, "tool": name, "args": args})
+                        print(f"[步骤 {step + 1}] 调用工具 {name} 参数={json.dumps(args, ensure_ascii=False)} (LLM {llm_time:.2f}s)")
+                    emit({"type": "step", "step": step + 1, "tool": name, "args": args, "llm_time": llm_time})
+                    t0 = time.perf_counter()
                     result = self._execute(name, args)
-                    emit({"type": "preview", "text": result})
+                    calc_time = time.perf_counter() - t0
+                    if self.verbose:
+                        print(f"[步骤 {step + 1}] 工具 {name} 计算耗时 {calc_time:.3f}s")
+                    emit({"type": "preview", "text": result, "calc_time": calc_time})
                     messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
             else:
                 final_answer = "(达到最大工具调用轮数，已按当前结果输出)"

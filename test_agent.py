@@ -178,13 +178,43 @@ check("文件名-工具设置", a.output_name == "我的结果.xlsx")
 
 
 # ---------------------------------------------------------------------------
-# 10. 工具数量自检
+# 10. 等级感知筛选 + run_python
+# ---------------------------------------------------------------------------
+gdf = pd.DataFrame({"等级": ["A+", "A", "B+", "B", "B-", "C", "D"]})
+a = make_agent(gdf)
+a._execute("filter_rows", {"filters": [{"column": "等级", "op": ">=", "value": "B"}]})
+check("筛选-等级B及以上", sorted(a.df["等级"].tolist()) == ["A", "A+", "B", "B+"],
+      f"实际 {list(a.df['等级'])}")
+
+gdf2 = pd.DataFrame({"班级": ["1班", "1班", "2班"], "语文": ["A", "B", "C"]})
+a = make_agent(gdf2)
+a._execute("run_python", {"code": "df['等级数值'] = grade_num(df['语文'])"})
+check("run_python-等级转数值", list(a.df["等级数值"]) == [12, 9, 6], f"实际 {list(a.df['等级数值'])}")
+
+gdf3 = pd.DataFrame({
+    "班级": ["1班", "1班", "1班", "2班", "2班"],
+    "姓名": ["甲", "乙", "丙", "丁", "戊"],
+    "语文": ["A", "B", "C", "B+", "D"],
+    "数学": ["B", "B", "D", "A", "C"],
+})
+a = make_agent(gdf3)
+a._execute("insert_group_ratio", {"group_by": ["班级"], "columns": ["语文", "数学"],
+                                  "grade": "B", "label_col": "姓名", "label": "B及以上比例(%)"})
+summary = a.df[a.df["姓名"] == "B及以上比例(%)"]
+check("insert_group_ratio-插入行数", len(summary) == 2 and len(a.df) == 7)
+check("insert_group_ratio-比例值", summary.set_index("班级").loc["1班", "语文"] == 66.7
+      and summary.set_index("班级").loc["2班", "数学"] == 50.0)
+
+
+# ---------------------------------------------------------------------------
+# 11. 工具数量自检
 # ---------------------------------------------------------------------------
 names = [t["function"]["name"] for t in agent.TOOLS]
 expect = {"filter_rows", "sort_rows", "select_columns", "group_aggregate", "take_top_n",
           "reset", "merge_tables", "compute_rank", "classify_grades",
-          "score_segment_stats", "compute_stats", "compare_scores", "set_output_name"}
-check("工具数量=13", len(names) == 13 and set(names) == expect, f"实际 {names}")
+          "score_segment_stats", "compute_stats", "compare_scores", "set_output_name",
+          "insert_group_ratio", "run_python"}
+check("工具数量=15", len(names) == 15 and set(names) == expect, f"实际 {names}")
 
 
 print("\n" + "=" * 50)

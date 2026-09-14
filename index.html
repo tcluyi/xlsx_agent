@@ -237,18 +237,27 @@ function handleEvent(ev, current) {
     case 'status':
       addStatus(ev.text);
       return current;
+    case 'timing':
+      addStatus('第 ' + ev.step + ' 轮：LLM 响应 ' + (ev.llm_time || 0).toFixed(2) + 's');
+      return current;
     case 'step': {
-      const b = addAssistant('步骤 ' + ev.step + '：调用工具 ' + ev.tool, 'step');
-      const name = document.createElement('span');
-      name.className = 'tool-name';
+      const label = '步骤 ' + ev.step + '：调用工具 ' + ev.tool +
+        (typeof ev.llm_time === 'number' ? '　· LLM 响应 ' + ev.llm_time.toFixed(2) + 's' : '');
+      const b = addAssistant(label, 'step');
       if (ev.args && Object.keys(ev.args).length) {
         appendCode(b, JSON.stringify(ev.args, null, 2));
       }
       return b;
     }
     case 'preview':
-      if (current) appendCode(current, ev.text);
-      else addAssistant(ev.text);
+      if (current) {
+        appendCode(current, ev.text);
+        if (typeof ev.calc_time === 'number') {
+          appendCode(current, '—— 计算耗时 ' + ev.calc_time.toFixed(3) + 's');
+        }
+      } else {
+        addAssistant(ev.text);
+      }
       return current;
     case 'answer':
       addAssistant(ev.text, 'answer');
